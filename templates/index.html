@@ -422,6 +422,55 @@
 </head>
 <body>
 
+<!-- MODAL DE CARGA -->
+<div id="modal-carga" style="display:none;position:fixed;inset:0;z-index:200;background:rgba(10,8,20,.8);
+  align-items:center;justify-content:center;">
+  <div style="background:#16213e;border:1px solid #0f3460;border-radius:10px;padding:24px;
+    width:340px;display:flex;flex-direction:column;gap:14px;">
+
+    <div style="display:flex;align-items:center;gap:10px">
+      <div id="modal-preview" style="width:80px;height:80px;border-radius:6px;border:1px solid #0f3460;
+        background:#0a0818;flex-shrink:0;overflow:hidden;display:flex;align-items:center;justify-content:center;">
+        <span style="color:#506070;font-size:10px">preview</span>
+      </div>
+      <div style="flex:1">
+        <div style="font-size:13px;font-weight:600;color:#e0e0e0;margin-bottom:3px" id="modal-nombre">imagen.jpg</div>
+        <div style="font-size:10px;color:#506070" id="modal-info"></div>
+      </div>
+    </div>
+
+    <div>
+      <div style="font-size:10px;color:#506070;margin-bottom:6px;text-transform:uppercase;letter-spacing:.8px">
+        Sensibilidad del trazo
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <span style="font-size:9px;color:#506070;width:60px">Fino/claro</span>
+        <input type="range" id="modal-umbral" min="10" max="200" value="80" style="flex:1;accent-color:#e94560"
+          oninput="document.getElementById('modal-val').textContent=this.value">
+        <span style="font-size:9px;color:#506070;width:65px;text-align:right">Grueso/oscuro</span>
+      </div>
+      <div style="text-align:center;font-size:10px;color:#e94560" id="modal-val">80</div>
+      <div style="font-size:9px;color:#506070;margin-top:6px;line-height:1.5">
+        Bajo (10-50): solo trazos negros puros. Bueno para bocetos a tinta.<br>
+        Alto (100-200): incluye grises oscuros. Mejor para cómics coloreados.
+      </div>
+    </div>
+
+    <div style="display:flex;gap:8px">
+      <button onclick="cancelarCarga()"
+        style="flex:1;padding:8px;border-radius:5px;border:1px solid #0f3460;
+        background:transparent;color:#7a8ba0;cursor:pointer;font-size:11px">
+        Cancelar
+      </button>
+      <button onclick="confirmarCarga()"
+        style="flex:1;padding:8px;border-radius:5px;border:none;
+        background:#e94560;color:#fff;cursor:pointer;font-size:11px;font-weight:600">
+        Cargar
+      </button>
+    </div>
+  </div>
+</div>
+
 <!-- SPINNER -->
 <div id="spinner">
   <div class="spin"></div>
@@ -662,23 +711,53 @@ dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-ove
 dropZone.addEventListener('drop', e => {
   e.preventDefault();
   dropZone.classList.remove('drag-over');
-  if (e.dataTransfer.files[0]) cargarArchivo(e.dataTransfer.files[0]);
+  if (e.dataTransfer.files[0]) abrirModalCarga(e.dataTransfer.files[0]);
 });
 inputArchivo.addEventListener('change', () => {
-  if (inputArchivo.files[0]) cargarArchivo(inputArchivo.files[0]);
+  if (inputArchivo.files[0]) abrirModalCarga(inputArchivo.files[0]);
 });
 
-async function cargarArchivo(archivo) {
+let _archivoPendiente = null;
+
+function abrirModalCarga(archivo) {
+  _archivoPendiente = archivo;
+  document.getElementById('modal-nombre').textContent = archivo.name;
+  document.getElementById('modal-info').textContent = (archivo.size / 1024).toFixed(0) + ' KB';
+  const reader = new FileReader();
+  reader.onload = ev => {
+    const prev = document.getElementById('modal-preview');
+    prev.innerHTML = '';
+    const img = document.createElement('img');
+    img.src = ev.target.result;
+    img.style.cssText = 'width:100%;height:100%;object-fit:contain';
+    prev.appendChild(img);
+  };
+  reader.readAsDataURL(archivo);
+  document.getElementById('modal-carga').style.display = 'flex';
+}
+
+function cancelarCarga() {
+  _archivoPendiente = null;
+  document.getElementById('modal-carga').style.display = 'none';
+  inputArchivo.value = '';
+}
+
+async function confirmarCarga() {
+  if (!_archivoPendiente) return;
+  document.getElementById('modal-carga').style.display = 'none';
   mostrarSpinner(true);
+  const umbral = document.getElementById('modal-umbral').value;
   const fd = new FormData();
-  fd.append('imagen', archivo);
+  fd.append('imagen', _archivoPendiente);
+  fd.append('umbral', umbral);
+  _archivoPendiente = null;
   try {
     const resp = await fetch('/cargar', { method: 'POST', body: fd });
     const data = await resp.json();
-    if (data.error) { alert(data.error); return; }
+    if (data.error) { alert('Error: ' + data.error); return; }
     inicializarCanvas(data.trazo_b64, data.ancho, data.alto);
   } catch(e) {
-    alert('Error al cargar la imagen.');
+    alert('No se pudo cargar. Verifica que sea JPG, PNG, BMP o TIFF.');
   } finally {
     mostrarSpinner(false);
   }

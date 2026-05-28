@@ -22,52 +22,48 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 # Utilidades de imagen
 # ---------------------------------------------------------------------------
 
-def limpiar_trazo(img_bgr: np.ndarray) -> np.ndarray:
+def limpiar_trazo(img_bgr: np.ndarray, umbral_manual: int = None) -> np.ndarray:
     """
-    Limpia el boceto preservando la suavidad del trazo original.
-    Retorna imagen en escala de grises donde 0=trazo, 255=fondo limpio.
-    Sin binarizacion dura — los bordes del trazo mantienen su anti-alias.
+    Limpia el boceto y retorna escala de grises: 0=trazo, 255=fondo.
+    umbral_manual: 0-255. Bajo = trazo fino (solo negro puro),
+                           Alto = trazo grueso (incluye grises oscuros).
+                   None  = Otsu automatico (bocetos a lapiz/tinta).
     """
     gris = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
 
-    # Escalar si es muy pequeña (mejora detalle del trazo)
     h, w = gris.shape
     if max(h, w) < 1200:
         factor = 1200 / max(h, w)
         gris = cv2.resize(gris, (int(w * factor), int(h * factor)), interpolation=cv2.INTER_LANCZOS4)
 
-    # Reducir ruido sin destruir bordes (bilateral preserva contornos mejor que gaussian)
     suave = cv2.bilateralFilter(gris, d=5, sigmaColor=20, sigmaSpace=5)
 
-    # Normalizar iluminacion desigual: dividir por el fondo estimado (top-hat morfologico)
     kernel_fondo = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (51, 51))
     fondo = cv2.morphologyEx(suave, cv2.MORPH_DILATE, kernel_fondo)
-    # Dividir y reescalar: donde hay trazo, el cociente es bajo; donde hay fondo, es ~1
     normalizado = cv2.divide(suave.astype(np.float32), fondo.astype(np.float32) + 1e-6)
     normalizado = np.clip(normalizado * 255, 0, 255).astype(np.uint8)
 
-    # Aumentar contraste con CLAHE para que el trazo resalte sin pixelar
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     contraste = clahe.apply(normalizado)
 
-    # Blur suave ANTES del umbral para anti-aliasing en los bordes del trazo
     blur_aa = cv2.GaussianBlur(contraste, (3, 3), 0.8)
 
-    # Umbral de Otsu global — funciona bien para tinta porque hay contraste claro
-    _, umbral = cv2.threshold(blur_aa, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    if umbral_manual is not None:
+        # Umbral fijo: el usuario controla qué tan oscuro tiene que ser un pixel
+        # para considerarse trazo. Valor alto = captura trazos mas grises/gruesos.
+        _, umbral = cv2.threshold(blur_aa, 255 - umbral_manual, 255, cv2.THRESH_BINARY)
+    else:
+        # Otsu automatico — bueno para bocetos b/n con fondo claro
+        _, umbral = cv2.threshold(blur_aa, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    # Limpiar manchas pequeñas del fondo
     kernel_limpieza = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     limpio = cv2.morphologyEx(umbral, cv2.MORPH_OPEN, kernel_limpieza)
 
-    # Suavizar los bordes del trazo con un blur muy leve post-umbral
-    # Esto restaura el anti-alias que el umbral destruyo
     limpio_f = limpio.astype(np.float32)
     suavizado = cv2.GaussianBlur(limpio_f, (0, 0), 1.2)
-    # Remezclar: 70% suavizado + 30% duro para mantener bordes pero sin escalera
     final = np.clip(suavizado * 0.7 + limpio_f * 0.3, 0, 255).astype(np.uint8)
 
-    return final  # 255=fondo blanco, 0=trazo negro
+    return final
 
 
 def img_a_base64(img_bw: np.ndarray) -> str:
@@ -136,16 +132,31 @@ def cargar():
         return jsonify({"error": "No se recibio imagen"}), 400
 
     archivo = request.files["imagen"]
-    ruta = UPLOAD_DIR / archivo.filename
-    archivo.save(str(ruta))
+    if not archivo or archivo.filename == "":
+        return jsonify({"error": "Archivo vacio o sin nombre"}), 400
 
-    img = cv2.imread(str(ruta))
+    # Leer directamente en memoria — evita problemas con nombres de archivo
+    # especiales, rutas con espacios, o caracteres unicode
+    try:
+        buf = archivo.read()
+        arr = np.frombuffer(buf, dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    except Exception as e:
+        return jsonify({"error": f"No se pudo decodificar la imagen: {e}"}), 400
+
     if img is None:
-        return jsonify({"error": "No se pudo leer la imagen"}), 400
+        return jsonify({"error": "Formato de imagen no soportado"}), 400
 
-    limpia = limpiar_trazo(img)
+    # Parametros de limpieza enviados desde el modal
+    umbral_manual = request.form.get("umbral", None)
+    umbral = int(umbral_manual) if umbral_manual else None
+
+    try:
+        limpia = limpiar_trazo(img, umbral_manual=umbral)
+    except Exception as e:
+        return jsonify({"error": f"Error al procesar imagen: {e}"}), 500
+
     h, w = limpia.shape
-
     return jsonify({
         "trazo_b64": img_a_base64(limpia),
         "ancho": w,
